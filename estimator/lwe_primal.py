@@ -12,13 +12,16 @@ from .reduction import delta as deltaf
 from .reduction import cost as costf
 from .util import local_minimum
 from .cost import Cost
-from .lwe import LWEParameters
+from .lwe_parameters import LWEParameters
 from .simulator import normalize as simulator_normalize
 from .prob import drop as prob_drop
 from .prob import amplify as prob_amplify
 from .prob import babai as prob_babai
+from .prob import mitm_babai_probability
 from .io import Logging
-from .conf import red_cost_model_default, red_shape_model_default, red_simulator_default
+from .conf import red_cost_model as red_cost_model_default
+from .conf import red_shape_model as red_shape_model_default
+from .conf import red_simulator as red_simulator_default
 
 
 class PrimalUSVP:
@@ -134,11 +137,11 @@ class PrimalUSVP:
         """
         Estimate cost of solving LWE via uSVP reduction.
 
-        :param params: LWE parameters
-        :param red_cost_model: How to cost lattice reduction
-        :param red_shape_model: How to model the shape of a reduced basis
-        :param optimize_d: Attempt to find minimal d, too
-        :return: A cost dictionary
+        :param params: LWE parameters.
+        :param red_cost_model: How to cost lattice reduction.
+        :param red_shape_model: How to model the shape of a reduced basis.
+        :param optimize_d: Attempt to find minimal d, too.
+        :return: A cost dictionary.
 
         The returned cost dictionary has the following entries:
 
@@ -151,17 +154,17 @@ class PrimalUSVP:
         EXAMPLE::
 
             >>> from estimator import *
-            >>> primal_usvp(Kyber512)
-            rop: ≈2^141.2, red: ≈2^141.2, δ: 1.004111, β: 382, d: 973, tag: usvp
+            >>> LWE.primal_usvp(Kyber512)
+            rop: ≈2^148.0, red: ≈2^148.0, δ: 1.003941, β: 406, d: 998, tag: usvp
 
-            >>> params = LWEParameters(n=200, q=127, Xs=ND.UniformMod(3), Xe=ND.UniformMod(3))
-            >>> primal_usvp(params, red_shape_model="cn11")
+            >>> params = LWE.Parameters(n=200, q=127, Xs=ND.UniformMod(3), Xe=ND.UniformMod(3))
+            >>> LWE.primal_usvp(params, red_shape_model="cn11")
             rop: ≈2^91.2, red: ≈2^91.2, δ: 1.006114, β: 209, d: 388, tag: usvp
 
-            >>> primal_usvp(params, red_shape_model=Simulator.CN11)
+            >>> LWE.primal_usvp(params, red_shape_model=Simulator.CN11)
             rop: ≈2^91.2, red: ≈2^91.2, δ: 1.006114, β: 209, d: 388, tag: usvp
 
-            >>> primal_usvp(params, red_shape_model=Simulator.CN11, optimize_d=False)
+            >>> LWE.primal_usvp(params, red_shape_model=Simulator.CN11, optimize_d=False)
             rop: ≈2^91.3, red: ≈2^91.3, δ: 1.006114, β: 209, d: 400, tag: usvp
 
         The success condition was formulated in [USENIX:ADPS16]_ and studied/verified in
@@ -241,7 +244,7 @@ primal_usvp = PrimalUSVP()
 class PrimalHybrid:
     @classmethod
     def babai_cost(cls, d):
-        return Cost(rop=d ** 2)
+        return Cost(rop=max(d, 1) ** 2)
 
     @classmethod
     def svp_dimension(cls, r, D):
@@ -341,7 +344,14 @@ class PrimalHybrid:
 
             svp_cost = svp_cost.repeat(ssf(search_space))
 
-        if eta <= 20:  # NOTE: somewhat arbitrary bound
+        if mitm and zeta > 0:
+            if babai:
+                probability *= mitm_babai_probability(r, params.Xe.stddev, params.q)
+            else:
+                # TODO: the probability in this case needs to be analysed
+                probability *= 1
+
+        if eta <= 20 and d >= 0:  # NOTE: η: somewhat arbitrary bound, d: we may guess it all
             probability *= RR(prob_babai(r, sqrt(d) * params.Xe.stddev))
 
         ret = Cost()
@@ -366,7 +376,7 @@ class PrimalHybrid:
         )
 
         # 4. Repeat whole experiment ~1/prob times
-        if probability:
+        if probability and not RR(probability).is_NaN():
             ret = ret.repeat(
                 prob_amplify(0.99, probability),
             )
@@ -375,14 +385,15 @@ class PrimalHybrid:
 
         return ret
 
+    @classmethod
     def cost_zeta(
-        self,
+        cls,
         zeta: int,
         params: LWEParameters,
         red_shape_model=red_simulator_default,
         red_cost_model=red_cost_model_default,
         m: int = oo,
-        babai: bool = False,
+        babai: bool = True,
         mitm: bool = True,
         optimize_d=True,
         log_level=5,
@@ -404,7 +415,7 @@ class PrimalHybrid:
         Logging.log("bdd", log_level, f"H0: {repr(baseline_cost)}")
 
         f = partial(
-            self.cost,
+            cls.cost,
             params=params,
             zeta=zeta,
             babai=babai,
@@ -416,8 +427,12 @@ class PrimalHybrid:
         )
 
         # step 1. optimize β
-        with local_minimum(40, baseline_cost["beta"] + 1, log_level=log_level + 1) as it:
+        with local_minimum(
+            40, baseline_cost["beta"] + 1, precision=2, log_level=log_level + 1
+        ) as it:
             for beta in it:
+                it.update(f(beta))
+            for beta in it.neighborhood:
                 it.update(f(beta))
             cost = it.y
 
@@ -433,12 +448,14 @@ class PrimalHybrid:
                 cost = it.y
             Logging.log("bdd", log_level, f"H2: {repr(cost)}")
 
+        if cost is None:
+            return Cost(rop=oo)
         return cost
 
     def __call__(
         self,
         params: LWEParameters,
-        babai: bool = False,
+        babai: bool = True,
         zeta: int = None,
         mitm: bool = True,
         red_shape_model=red_shape_model_default,
@@ -477,11 +494,24 @@ class PrimalHybrid:
         EXAMPLE::
 
             >>> from estimator import *
-            >>> primal_hybrid(Kyber512.updated(Xs=ND.SparseTernary(512, 16)))
-            rop: ≈2^84.2, red: ≈2^83.7, svp: ≈2^82.6, β: 155, η: 50, ζ: 256, |S|: ≈2^73.5, d: 500, prob: 0.050, ...
+            >>> LWE.primal_hybrid(Kyber512.updated(Xs=ND.SparseTernary(512, 16)), mitm = False, babai = False)
+            rop: ≈2^94.9, red: ≈2^94.3, svp: ≈2^93.3, β: 178, η: 21, ζ: 256, |S|: ≈2^56.6, d: 531, prob: 0.003, ...
 
+            >>> LWE.primal_hybrid(Kyber512.updated(Xs=ND.SparseTernary(512, 16)), mitm = False, babai = True)
+            rop: ≈2^94.7, red: ≈2^94.0, svp: ≈2^93.3, β: 169, η: 2, ζ: 256, |S|: ≈2^62.4, d: 519, prob: 0.001, ...
+
+            >>> LWE.primal_hybrid(Kyber512.updated(Xs=ND.SparseTernary(512, 16)), mitm = True, babai = False)
+            rop: ≈2^75.4, red: ≈2^75.0, svp: ≈2^73.3, β: 102, η: 15, ζ: 322, |S|: ≈2^82.9, d: 354, prob: 0.001, ...
+
+            >>> LWE.primal_hybrid(Kyber512.updated(Xs=ND.SparseTernary(512, 16)), mitm = True, babai = True)
+            rop: ≈2^86.6, red: ≈2^85.7, svp: ≈2^85.6, β: 104, η: 2, ζ: 371, |S|: ≈2^91.1, d: 308, prob: ≈2^-21.3, ...
 
         """
+
+        if zeta == 0:
+            tag = "bdd"
+        else:
+            tag = "hybrid"
 
         params = LWEParameters.normalize(params)
 
@@ -501,37 +531,35 @@ class PrimalHybrid:
             log_level=log_level + 1,
         )
 
-        if babai is False:
-            if zeta is None:
-                with local_minimum(0, params.n, log_level=log_level) as it:
-                    for zeta in it:
-                        it.update(
-                            f(
-                                zeta=zeta,
-                                optimize_d=False,
-                                **kwds,
-                            )
+        if zeta is None:
+            with local_minimum(0, params.n, log_level=log_level) as it:
+                for zeta in it:
+                    it.update(
+                        f(
+                            zeta=zeta,
+                            optimize_d=False,
+                            **kwds,
                         )
-                # TODO: this should not be required
-                cost = min(it.y, f(0, optimize_d=False, **kwds))
-            else:
-                cost = f(zeta=zeta)
+                    )
+            # TODO: this should not be required
+            cost = min(it.y, f(0, optimize_d=False, **kwds))
         else:
-            raise NotImplementedError
+            cost = f(zeta=zeta)
 
-        if cost.get("zeta", 0) == 0:
-            cost["tag"] = cost.get("tag", "bdd")
+        cost["tag"] = tag
+        cost["problem"] = params
+
+        if tag == "bdd":
+            cost["tag"] = tag
             cost["problem"] = params
             try:
                 del cost["|S|"]
                 del cost["prob"]
-                del cost["repeat"]
+                del cost["repetitions"]
                 del cost["zeta"]
             except KeyError:
                 pass
-        else:
-            cost["tag"] = cost.get("tag", "hybrid")
-            cost["problem"] = params
+
         return cost
 
     __name__ = "primal_hybrid"

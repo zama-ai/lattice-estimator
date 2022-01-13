@@ -6,12 +6,12 @@ from sage.all import ceil, floor
 from .io import Logging
 
 
-class local_minimum:
+class local_minimum_base:
     """
     An iterator context for finding a local minimum using binary search.
 
-    We use the neighborhood of a point to decide the next direction to go into (gradient descent
-    style), so the algorithm is not plain binary search (see ``update()`` function.)
+    We use the immediate neighborhood of a point to decide the next direction to go into (gradient
+    descent style), so the algorithm is not plain binary search (see ``update()`` function.)
 
     .. note :: We combine an iterator and a context to give the caller access to the result.
     """
@@ -21,8 +21,8 @@ class local_minimum:
         start,
         stop,
         smallerf=lambda x, best: x <= best,
-        log_level=5,
         suppress_bounds_warning=False,
+        log_level=5,
     ):
         """
         Create a fresh local minimum search context.
@@ -33,6 +33,10 @@ class local_minimum:
         :param suppress_bounds_warning: do not warn if a boundary is picked as optimal
 
         """
+
+        if stop < start:
+            raise ValueError(f"Incorrect bounds {start} > {stop}.")
+
         self._suppress_bounds_warning = suppress_bounds_warning
         self._log_level = log_level
         self._start = start
@@ -45,6 +49,7 @@ class local_minimum:
         self._last_x = None
         self._next_x = self._stop
         self._best = (None, None)
+        self._all_x = set()
 
     def __enter__(self):
         """ """
@@ -59,19 +64,28 @@ class local_minimum:
         return self
 
     def __next__(self):
-        if self._next_x is not None:
+        abort = False
+        if self._next_x is None:
+            abort = True  # we're told to abort
+        elif self._next_x in self._all_x:
+            abort = True  # we're looping
+        elif self._next_x < self._initial_bounds[0] or self._initial_bounds[1] < self._next_x:
+            abort = True  # we're stepping out of bounds
+
+        if not abort:
             self._last_x = self._next_x
             self._next_x = None
             return self._last_x
-        else:
-            if self._best[0] in self._initial_bounds and not self._suppress_bounds_warning:
-                # We warn the user if the optimal solution is at the edge and thus possibly not optimal.
-                Logging.log(
-                    "bins",
-                    self._log_level,
-                    f'warning: "optimal" solution {self._best[0]} matches a bound ∈ {self._initial_bounds}.',
-                )
-            raise StopIteration
+
+        if self._best[0] in self._initial_bounds and not self._suppress_bounds_warning:
+            # We warn the user if the optimal solution is at the edge and thus possibly not optimal.
+            Logging.log(
+                "bins",
+                self._log_level,
+                f'warning: "optimal" solution {self._best[0]} matches a bound ∈ {self._initial_bounds}.',
+            )
+
+        raise StopIteration
 
     @property
     def x(self):
@@ -82,7 +96,23 @@ class local_minimum:
         return self._best[1]
 
     def update(self, res):
+        """
+
+        TESTS:
+
+        We keep cache old inputs in ``_all_x`` to prevent infinite loops::
+
+            >>> from estimator.util import binary_search
+            >>> from estimator.cost import Cost
+            >>> f = lambda x, log_level=1: Cost(rop=1) if x >= 19 else Cost(rop=2)
+            >>> binary_search(f, 10, 30, "x")
+            rop: 1
+
+        """
+
         Logging.log("bins", self._log_level, f"({self._last_x}, {repr(res)})")
+
+        self._all_x.add(self._last_x)
 
         # We got nothing yet
         if self._best[0] is None:
@@ -128,8 +158,67 @@ class local_minimum:
             self._next_x = None
 
 
+class local_minimum(local_minimum_base):
+    """
+    An iterator context for finding a local minimum using binary search.
+
+    We use the neighborhood of a point to decide the next direction to go into (gradient descent
+    style), so the algorithm is not plain binary search (see ``update()`` function.)
+
+    We also zoom out by a factor ``precision``, find an approximate local minimum and then
+    search the neighbourhood for the smallest value.
+
+    .. note :: We combine an iterator and a context to give the caller access to the result.
+
+    """
+
+    def __init__(
+        self,
+        start,
+        stop,
+        precision=1,
+        smallerf=lambda x, best: x <= best,
+        suppress_bounds_warning=False,
+        log_level=5,
+    ):
+        """
+        Create a fresh local minimum search context.
+
+        :param start: starting point
+        :param stop:  end point (exclusive)
+        :param precision: only consider every ``precision``-th value in the main loop
+        :param smallerf: a function to decide if ``lhs`` is smaller than ``rhs``.
+        :param suppress_bounds_warning: do not warn if a boundary is picked as optimal
+
+        """
+        self._precision = precision
+        self._orig_bounds = (start, stop)
+        start = ceil(start / precision)
+        stop = floor(stop / precision)
+        local_minimum_base.__init__(self, start, stop, smallerf, suppress_bounds_warning, log_level)
+
+    def __next__(self):
+        x = local_minimum_base.__next__(self)
+        return x * self._precision
+
+    @property
+    def x(self):
+        return self._best[0] * self._precision
+
+    @property
+    def neighborhood(self):
+        """
+        An iterator over the neighborhood of the currently best value.
+        """
+
+        start, stop = self._orig_bounds
+
+        for x in range(max(start, self.x - self._precision), min(stop, self.x + self._precision)):
+            yield x
+
+
 def binary_search(
-    f, start, stop, param, smallerf=lambda x, best: x <= best, log_level=5, *args, **kwds
+    f, start, stop, param, step=1, smallerf=lambda x, best: x <= best, log_level=5, *args, **kwds
 ):
     """
     Searches for the best value in the interval [start,stop] depending on the given comparison function.
@@ -138,62 +227,21 @@ def binary_search(
     :param stop: stop of range to search (exclusive)
     :param param: the parameter to modify when calling `f`
     :param smallerf: comparison is performed by evaluating ``smallerf(current, best)``
+    :param step: initially only consider every `steps`-th value
     """
 
-    with local_minimum(start, stop + 1, smallerf=smallerf, log_level=log_level) as it:
+    with local_minimum(start, stop + 1, step, smallerf=smallerf, log_level=log_level) as it:
         for x in it:
             kwds_ = dict(kwds)
             kwds_[param] = x
             it.update(f(*args, **kwds_))
-        return it.y
 
-    kwds[param] = stop
-    D = {}
-    D[stop] = f(*args, log_level=log_level + 1, **kwds)
-    Logging.log("bins", log_level, f"{param}: {stop:4d} || {repr(D[stop])}")
-    best = D[stop]
-    b = ceil((start + stop) / 2)
-    direction = 0
-    while True:
-        if b not in D:
-            kwds[param] = b
-            D[b] = f(*args, log_level=log_level + 1, **kwds)
-            Logging.log("bins", log_level, f"{param}: {b:4d} || {repr(D[b])}")
-        if b == start:
-            best = D[start]
-            break
-        if not smallerf(D[b], best):
-            if direction == 0:
-                start = b
-                b = ceil((stop + b) / 2)
-            else:
-                stop = b
-                b = floor((start + b) / 2)
-        else:
-            best = D[b]
-            Logging.log("bins", log_level, f"{param}: {b:4d} || {repr(best)}")
-            if b - 1 not in D:
-                kwds[param] = b - 1
-                D[b - 1] = f(*args, log_level=log_level + 1, **kwds)
-                Logging.log("bins", log_level, f"{param}: {b-1:4d} || {repr(D[b-1])}")
-            if smallerf(D[b - 1], best):
-                best = D[b - 1]
-                stop = b
-                b = floor((b + start) / 2)
-                direction = 0
-            else:
-                if b + 1 not in D:
-                    kwds[param] = b + 1
-                    D[b + 1] = f(*args, log_level=log_level + 1, **kwds)
-                    Logging.log("bins", log_level, f"{param}: {b+1:4d} || {repr(D[b+1])}")
-                if not smallerf(D[b + 1], best):
-                    break
-                else:
-                    best = D[b + 1]
-                    start = b
-                    b = ceil((stop + b) / 2)
-                    direction = 1
-    return best
+        for x in it.neighborhood:
+            kwds_ = dict(kwds)
+            kwds_[param] = x
+            it.update(f(*args, **kwds_))
+
+        return it.y
 
 
 def _batch_estimatef(f, x, log_level=0, f_repr=None):
@@ -214,7 +262,7 @@ def f_name(f):
 
 
 def batch_estimate(params, algorithm, jobs=1, log_level=0, **kwds):
-    from .lwe import LWEParameters
+    from .lwe_parameters import LWEParameters
 
     if isinstance(params, LWEParameters):
         params = (params,)

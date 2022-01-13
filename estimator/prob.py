@@ -1,6 +1,41 @@
 # -*- coding: utf-8 -*-
 from sage.all import binomial, ZZ, log, ceil, RealField, oo, exp, pi
-from sage.all import RealDistribution, RR, sqrt, prod
+from sage.all import RealDistribution, RR, sqrt, prod, erf
+from .nd import sigmaf
+
+
+def mitm_babai_probability(r, stddev, q, fast=False):
+    """
+    Compute the "e-admissibility" probability associated to the mitm step, according to
+    [EPRINT:SonChe19]_
+
+    :params r: the squared GSO lengths
+    :params stddev: the std.dev of the error distribution
+    :params q: the LWE modulus
+    :param fast: toggle for setting p = 1 (faster, but underestimates security)
+    :return: probability for the mitm process
+
+    # NOTE: the model sometimes outputs negative probabilities, we set p = 0 in this case
+    """
+
+    if fast:
+        # overestimate the probability -> underestimate security
+        p = 1
+    else:
+        # get non-squared norms
+        R = [sqrt(s) for s in r]
+        alphaq = sigmaf(stddev)
+        probs = [
+            RR(
+                erf(s * sqrt(RR(pi)) / alphaq)
+                + (alphaq / s) * ((exp(-s * sqrt(RR(pi)) / alphaq) - 1) / RR(pi))
+            )
+            for s in R
+        ]
+        p = RR(prod(probs))
+        if p < 0 or p > 1:
+            p = 0.0
+    return p
 
 
 def babai(r, norm):
@@ -57,10 +92,10 @@ def amplify(target_success_probability, success_probability, majority=False):
 
     prec = max(
         53,
-        2 * ceil(abs(log(success_probability, 2))),
-        2 * ceil(abs(log(1 - success_probability, 2))),
-        2 * ceil(abs(log(target_success_probability, 2))),
-        2 * ceil(abs(log(1 - target_success_probability, 2))),
+        2 * ceil(abs(float(log(success_probability, 2)))),
+        2 * ceil(abs(float(log(1 - success_probability, 2)))),
+        2 * ceil(abs(float(log(target_success_probability, 2)))),
+        2 * ceil(abs(float(log(1 - target_success_probability, 2)))),
     )
     prec = min(prec, 2048)
     RR = RealField(prec)

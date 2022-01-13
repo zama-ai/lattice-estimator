@@ -1,160 +1,180 @@
 # -*- coding: utf-8 -*-
-from sage.all import oo, binomial, log, sqrt, ceil
-from dataclasses import dataclass
-from copy import copy
-from .nd import NoiseDistribution
-from .errors import InsufficientSamplesError
+"""
+High-level LWE interface
+"""
+
+from .lwe_primal import primal_usvp, primal_bdd, primal_hybrid
+from .lwe_bkw import coded_bkw
+from .lwe_guess import exhaustive_search, mitm, distinguish  # noqa
+from .lwe_dual import dual, dual_hybrid
+from .lwe_guess import guess_composition
+from .gb import arora_gb  # noqa
+from .lwe_parameters import LWEParameters as Parameters  # noqa
 
 
-@dataclass
-class LWEParameters:
-    n: int
-    q: int
-    Xs: NoiseDistribution
-    Xe: NoiseDistribution
-    m: int = oo
-    tag: str = None
-
-    def __post_init__(self, **kwds):
-        self.Xs = copy(self.Xs)
-        self.Xs.n = self.n
-        if self.m < oo:
-            self.Xe = copy(self.Xe)
-            self.Xe.n = self.m
-
-    def normalize(self):
+class Estimate:
+    @classmethod
+    def rough(cls, params, jobs=1):
         """
-        EXAMPLES:
+        This function makes the following somewhat routine assumptions:
 
-        We perform the normal form transformation if χ_e < χ_s and we got the samples::
+        - The GSA holds.
+        - The Core-SVP model holds.
+
+        This function furthermore assumes the following heuristics:
+
+        - The primal hybrid attack only applies to sparse secrets.
+        - The dual hybrid MITM attack only applies to sparse secrets.
+        - Arora-GB only applies to bounded noise with at least `n^2` samples.
+        - BKW is not competitive.
+
+        :param params: LWE parameters.
+        :param jobs: Use multiple threads in parallel.
+
+        EXAMPLE ::
 
             >>> from estimator import *
-            >>> Xs=ND.DiscreteGaussian(2.0)
-            >>> Xe=ND.DiscreteGaussian(1.58)
-            >>> LWEParameters(n=512, q=8192, Xs=Xs, Xe=Xe).normalize()
-            LWEParameters(n=512, q=8192, Xs=D(σ=1.58), Xe=D(σ=1.58), m=+Infinity, tag=None)
+            >>> _ = lwe.estimate.rough(Kyber512)
+            usvp                 :: rop: ≈2^118.6, red: ≈2^118.6, δ: 1.003941, β: 406, d: 998, tag: usvp
+            dual_hybrid          :: rop: ≈2^127.2, mem: ≈2^123.3, m: 512, red: ≈2^127.0, δ: 1.003756, β: 435, ...
 
-        If m = n, we swap the secret and the noise::
-
-            >>> from estimator import *
-            >>> Xs=ND.DiscreteGaussian(2.0)
-            >>> Xe=ND.DiscreteGaussian(1.58)
-            >>> LWEParameters(n=512, q=8192, Xs=Xs, Xe=Xe, m=512).normalize()
-            LWEParameters(n=512, q=8192, Xs=D(σ=1.58), Xe=D(σ=2.00), m=512, tag=None)
 
         """
-        if self.m < 1:
-            raise InsufficientSamplesError(f"m={self.m} < 1")
+        # NOTE: Don't import these at the top-level to avoid circular imports
+        from functools import partial
+        from .reduction import ADPS16
+        from .util import batch_estimate, f_name
 
-        # Normal form transformation
-        if self.Xe < self.Xs and self.m >= 2 * self.n:
-            return LWEParameters(
-                n=self.n, q=self.q, Xs=self.Xe, Xe=self.Xe, m=self.m - self.n, tag=self.tag
+        from sage.all import oo
+
+        algorithms = {}
+
+        algorithms["usvp"] = partial(primal_usvp, red_cost_model=ADPS16, red_shape_model="gsa")
+
+        if params.Xs.is_sparse:
+            algorithms["hybrid"] = partial(
+                primal_hybrid, red_cost_model=ADPS16, red_shape_model="gsa"
             )
-        # swap secret and noise
-        if self.Xe < self.Xs and self.m == self.n:
-            return LWEParameters(n=self.n, q=self.q, Xs=self.Xe, Xe=self.Xs, m=self.n, tag=self.tag)
 
-        # nothing to do
-        return self
-
-    def updated(self, **kwds):
-        """
-        Return a new set of parameters updated according to ``kwds``.
-
-        :param kwds: We set ``key`` to ``value`` in the new set of parameters.
-
-        EXAMPLE::
-
-            >>> from estimator import *
-            >>> Kyber512
-            LWEParameters(n=512, q=3329, Xs=D(σ=1.22), Xe=D(σ=1.00), m=1024, tag='Kyber 512')
-            >>> Kyber512.updated(m=1337)
-            LWEParameters(n=512, q=3329, Xs=D(σ=1.22), Xe=D(σ=1.00), m=1337, tag='Kyber 512')
-
-        """
-        d = dict(self.__dict__)
-        d.update(kwds)
-        return LWEParameters(**d)
-
-    def amplify_m(self, m):
-        """
-        Return a LWE instance parameters with ``m`` samples produced from the samples in this instance.
-
-        :param m: New number of samples.
-
-        EXAMPLE::
-
-            >>> from sage.all import binomial, log
-            >>> from estimator import *
-            >>> Kyber512
-            LWEParameters(n=512, q=3329, Xs=D(σ=1.22), Xe=D(σ=1.00), m=1024, tag='Kyber 512')
-            >>> Kyber512.amplify_m(2**100)
-            LWEParameters(n=512, q=3329, Xs=D(σ=1.22), Xe=D(σ=3.46), m=126765..., tag='Kyber 512')
-
-        We can produce 2^100 samples by random ± linear combinations of 12 vectors::
-
-            >>> float(sqrt(12.)), float(log(binomial(1024, 12) , 2.0)) + 12
-            (3.46..., 103.07...)
-
-        """
-        if m <= self.m:
-            return self
-        if self.m == oo:
-            return self
-        d = dict(self.__dict__)
-
-        if self.Xe.mean != 0:
-            raise NotImplementedError("Amplifying for μ≠0 not implemented.")
-
-        for k in range(ceil(log(m, 2.0))):
-            # - binom(n,k) positions
-            #  -two signs per position (+1,-1)
-            # - all "-" and all "+" are the same
-            if binomial(self.m, k) * 2 ** k - 1 >= m:
-                Xe = NoiseDistribution.DiscreteGaussian(float(sqrt(k) * self.Xe.stddev))
-                d["Xe"] = Xe
-                d["m"] = ceil(m)
-                return LWEParameters(**d)
+        if params.Xs.is_sparse:
+            algorithms["dual_mitm_hybrid"] = partial(
+                dual_hybrid, red_cost_model=ADPS16, mitm_optimization=True
+            )
         else:
-            raise NotImplementedError(
-                f"Cannot amplify to ≈2^{log(m,2):1} using {{+1,-1}} additions."
+            algorithms["dual_hybrid"] = partial(
+                dual_hybrid, red_cost_model=ADPS16, mitm_optimization=False
             )
 
-    def switch_modulus(self):
+        if params.m > params.n ** 2 and params.Xe.is_bounded:
+            if params.Xs.is_sparse:
+                algorithms["arora-gb"] = guess_composition(arora_gb.cost_bounded)
+            else:
+                algorithms["arora-gb"] = arora_gb.cost_bounded
+
+        res_raw = batch_estimate(params, algorithms.values(), log_level=1, jobs=jobs)
+        res_raw = res_raw[params]
+        res = {}
+        for algorithm in algorithms:
+            for k, v in res_raw.items():
+                if f_name(algorithms[algorithm]) == k:
+                    res[algorithm] = v
+
+        for algorithm in algorithms:
+            for k, v in res.items():
+                if algorithm == k:
+                    if v["rop"] == oo:
+                        continue
+                    print(f"{algorithm:20s} :: {repr(v)}")
+        return res
+
+    def __call__(
+        self,
+        params,
+        red_cost_model=None,
+        red_shape_model=None,
+        deny_list=tuple(),
+        add_list=tuple(),
+        jobs=1,
+    ):
         """
-        Apply modulus switching and return new instance.
+        Run all estimates.
 
-        See [JMC:AlbPlaSco15]_ for details.
+        :param params: LWE parameters.
+        :param red_cost_model: How to cost lattice reduction.
+        :param red_shape_model: How to model the shape of a reduced basis (applies to primal attacks)
+        :param deny_list: skip these algorithms
+        :param add_list: add these ``(name, function)`` pairs to the list of algorithms to estimate.a
+        :param jobs: Use multiple threads in parallel.
 
-        EXAMPLE::
+        EXAMPLE ::
 
             >>> from estimator import *
-            >>> LWEParameters(n=128, q=7681, Xs=ND.UniformMod(3), Xe=ND.UniformMod(11)).switch_modulus()
-            LWEParameters(n=128, q=5289, Xs=D(σ=0.82), Xe=D(σ=3.08), m=+Infinity, tag=None)
+            >>> _ = lwe.estimate(Kyber512)
+            arora-gb             :: rop: ≈2^inf, dreg: 25, mem: ≈2^106.3, t: 3, m: ≈2^inf, tag: arora-gb, ↻: ≈2^inf, ...
+            bkw                  :: rop: ≈2^178.8, m: ≈2^166.8, mem: ≈2^167.8, b: 14, t1: 0, t2: 16, ℓ: 13, #cod: 448...
+            usvp                 :: rop: ≈2^148.0, red: ≈2^148.0, δ: 1.003941, β: 406, d: 998, tag: usvp
+            bdd                  :: rop: ≈2^144.5, red: ≈2^143.8, svp: ≈2^143.0, β: 391, η: 421, d: 1013, tag: bdd
+            dual                 :: rop: ≈2^169.9, mem: ≈2^130.0, m: 512, red: ≈2^169.7, δ: 1.003484, β: 484, d: 1024...
+            dual_hybrid          :: rop: ≈2^166.8, mem: ≈2^161.9, m: 512, red: ≈2^166.6, δ: 1.003541, β: 473, d: 1011...
 
         """
-        n = self.Xs.density * len(self.Xs)
+        from sage.all import oo
+        from functools import partial
+        from .conf import red_cost_model as red_cost_model_default
+        from .conf import red_shape_model as red_shape_model_default
+        from .util import batch_estimate, f_name
 
-        # n uniform in -(0.5,0.5) ± stddev(χ_s)
-        Xr_stddev = sqrt(n / 12) * self.Xs.stddev  # rounding noise
-        # χ_r == p/q ⋅ χ_e # we want the rounding noise match the scaled noise
-        p = ceil(Xr_stddev * self.q / self.Xe.stddev)
+        if red_cost_model is None:
+            red_cost_model = red_cost_model_default
+        if red_shape_model is None:
+            red_shape_model = red_shape_model_default
 
-        scale = float(p) / self.q
+        algorithms = {}
 
-        # there is no point in scaling if the improvement is eaten up by rounding noise
-        if scale > 1 / sqrt(2):
-            return self
+        algorithms["arora-gb"] = guess_composition(arora_gb)
+        algorithms["bkw"] = coded_bkw
 
-        return LWEParameters(
-            self.n,
-            p,
-            Xs=self.Xs,
-            Xe=NoiseDistribution.DiscreteGaussian(sqrt(2) * self.Xe.stddev * scale),
-            m=self.m,
-            tag=self.tag + ",scaled" if self.tag else None,
+        algorithms["usvp"] = partial(
+            primal_usvp, red_cost_model=red_cost_model, red_shape_model=red_shape_model
+        )
+        algorithms["bdd"] = partial(
+            primal_bdd, red_cost_model=red_cost_model, red_shape_model=red_shape_model
+        )
+        algorithms["hybrid"] = partial(
+            primal_hybrid, red_cost_model=red_cost_model, red_shape_model=red_shape_model
+        )
+        algorithms["dual"] = partial(dual, red_cost_model=red_cost_model)
+        algorithms["dual_hybrid"] = partial(
+            dual_hybrid, red_cost_model=red_cost_model, mitm_optimization=False
+        )
+        algorithms["dual_mitm_hybrid"] = partial(
+            dual_hybrid, red_cost_model=red_cost_model, mitm_optimization=True
         )
 
-    def __hash__(self):
-        return hash((self.n, self.q, self.Xs, self.Xe, self.m, self.tag))
+        for k in deny_list:
+            del algorithms[k]
+        for k, v in add_list:
+            algorithms[k] = v
+
+        res_raw = batch_estimate(params, algorithms.values(), log_level=1, jobs=jobs)
+        res_raw = res_raw[params]
+        res = {}
+        for algorithm in algorithms:
+            for k, v in res_raw.items():
+                if f_name(algorithms[algorithm]) == k:
+                    res[algorithm] = v
+
+        for algorithm in algorithms:
+            for k, v in res.items():
+                if algorithm == k:
+                    if v["rop"] == oo:
+                        continue
+                    if k == "hybrid" and res["bdd"]["rop"] < v["rop"]:
+                        continue
+                    if k == "dual_mitm_hybrid" and res["dual_hybrid"]["rop"] < v["rop"]:
+                        continue
+                    print(f"{algorithm:20s} :: {repr(v)}")
+        return res
+
+
+estimate = Estimate()
