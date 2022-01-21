@@ -711,7 +711,8 @@ class Kyber(ReductionCost):
         # small in practice using progressive sieving [40, 64], and we will assume that it needs to
         # be called only once per dimension during progressive sieving, for a cost of C · 2^137.4
         # gates^8." [Kyber20]_
-        gate_count = C * 2 ** (self.NN_AGPS[nn]["a"] * beta_ + self.NN_AGPS[nn]["b"])
+
+        gate_count = C * 2 ** (RR(self.NN_AGPS[nn]["a"]) * beta_ + RR(self.NN_AGPS[nn]["b"]))
         return self.LLL(d, B=B) + svp_calls * gate_count
 
     def short_vectors(self, beta, d, N=None, B=None, preprocess=True):
@@ -738,11 +739,11 @@ class Kyber(ReductionCost):
 
             >>> from estimator.reduction import RC
             >>> RC.Kyber.short_vectors(100, 500, 1)
-            (1.0, 2.736747612813679e+19, 1)
+            (1.0, 2.73674761281368e19, 1)
             >>> RC.Kyber.short_vectors(100, 500)
-            (1.1547, 2.736747612813679e+19, 176584)
+            (1.1547, 2.73674761281368e19, 176584)
             >>> RC.Kyber.short_vectors(100, 500, 1000)
-            (1.1547, 2.736747612813679e+19, 176584)
+            (1.1547, 2.73674761281368e19, 176584)
 
         """
 
