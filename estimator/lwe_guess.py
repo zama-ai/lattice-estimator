@@ -81,6 +81,8 @@ class guess_composition:
         :returns: (number of repetitions, γ, size of the search space, probability of success)
 
         """
+        if h == 0:
+            return 1, 0, 0, 1.0
         if not zeta:
             return 1, 0, 0, 1.0
 
@@ -132,14 +134,16 @@ class guess_composition:
             >>> from estimator import *
             >>> from estimator.lwe_guess import guess_composition
             >>> guess_composition(LWE.primal_usvp)(Kyber512.updated(Xs=ND.SparseTernary(512, 16)))
-            rop: ≈2^105.3, red: ≈2^105.3, δ: 1.008705, β: 113, d: 421, tag: usvp, ↻: ≈2^37.5, ζ: 265, |S|: 1,...
+            rop: ≈2^99.4, red: ≈2^99.4, δ: 1.008705, β: 113, d: 421, tag: usvp, ↻: ≈2^37.5, ζ: 265, |S|: 1, ...
 
         Compare::
 
             >>> LWE.primal_hybrid(Kyber512.updated(Xs=ND.SparseTernary(512, 16)))
-            rop: ≈2^87.3, red: ≈2^86.3, svp: ≈2^86.3, β: 105, η: 2, ζ: 372, |S|: ≈2^96.9, d: 309, prob: ≈2^-19.1, ...
+            rop: ≈2^85.8, red: ≈2^84.8, svp: ≈2^84.8, β: 105, η: 2, ζ: 366, |S|: ≈2^85.1, d: 315, prob: ≈2^-23.4, ...
 
         """
+        params = LWEParameters.normalize(params)
+
         if params.Xs.is_sparse:
             return self.sparse_solve(self.f, params, log_level, **kwds)
         else:

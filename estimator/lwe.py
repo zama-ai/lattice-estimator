@@ -14,7 +14,7 @@ from .lwe_parameters import LWEParameters as Parameters  # noqa
 
 class Estimate:
     @classmethod
-    def rough(cls, params, jobs=1):
+    def rough(cls, params, jobs=1, catch_exceptions=True):
         """
         This function makes the following somewhat routine assumptions:
 
@@ -30,6 +30,7 @@ class Estimate:
 
         :param params: LWE parameters.
         :param jobs: Use multiple threads in parallel.
+        :param catch_exceptions: When an estimate fails, just print a warning.
 
         EXAMPLE ::
 
@@ -46,6 +47,8 @@ class Estimate:
         from .util import batch_estimate, f_name
 
         from sage.all import oo
+
+        params = params.normalize()
 
         algorithms = {}
 
@@ -71,7 +74,9 @@ class Estimate:
             else:
                 algorithms["arora-gb"] = arora_gb.cost_bounded
 
-        res_raw = batch_estimate(params, algorithms.values(), log_level=1, jobs=jobs)
+        res_raw = batch_estimate(
+            params, algorithms.values(), log_level=1, jobs=jobs, catch_exceptions=catch_exceptions
+        )
         res_raw = res_raw[params]
         res = {}
         for algorithm in algorithms:
@@ -95,6 +100,7 @@ class Estimate:
         deny_list=tuple(),
         add_list=tuple(),
         jobs=1,
+        catch_exceptions=True,
     ):
         """
         Run all estimates.
@@ -105,19 +111,20 @@ class Estimate:
         :param deny_list: skip these algorithms
         :param add_list: add these ``(name, function)`` pairs to the list of algorithms to estimate.a
         :param jobs: Use multiple threads in parallel.
+        :param catch_exceptions: When an estimate fails, just print a warning.
 
         EXAMPLE ::
 
             >>> from estimator import *
             >>> _ = lwe.estimate(Kyber512)
             arora-gb             :: rop: ≈2^inf, dreg: 25, mem: ≈2^106.3, t: 3, m: ≈2^inf, tag: arora-gb, ↻: ≈2^inf, ...
-            bkw                  :: rop: ≈2^178.8, m: ≈2^166.8, mem: ≈2^167.8, b: 14, t1: 0, t2: 16, ℓ: 13, ...
-            usvp                 :: rop: ≈2^150.4, red: ≈2^150.4, δ: 1.003941, β: 406, d: 998, tag: usvp
-            bdd                  :: rop: ≈2^146.9, red: ≈2^146.3, svp: ≈2^145.4, β: 391, η: 421, d: 1013, tag: bdd
-            bdd_hybrid           :: rop: ≈2^146.9, red: ≈2^146.3, svp: ≈2^145.4, β: 391, η: 421, ζ: 0, |S|: 1, ...
-            bdd_mitm_hybrid      :: rop: ≈2^297.5, red: ≈2^297.5, svp: ≈2^167.3, β: 405, η: 2, ζ: 0, |S|: 1, ...
-            dual                 :: rop: ≈2^157.4, mem: ≈2^81.0, m: 512, β: 431, d: 1024, ↻: 1, tag: dual
-            dual_hybrid          :: rop: ≈2^151.7, mem: ≈2^147.5, m: 512, β: 410, d: 999, ↻: 1, ζ: 25, tag: dual_hybrid
+            bkw                  :: rop: ≈2^178.8, m: ≈2^166.8, mem: ≈2^167.8, b: 14, t1: 0, t2: 16, ℓ: 13, #cod: 448...
+            usvp                 :: rop: ≈2^143.8, red: ≈2^143.8, δ: 1.003941, β: 406, d: 998, tag: usvp
+            bdd                  :: rop: ≈2^140.3, red: ≈2^139.7, svp: ≈2^138.8, β: 391, η: 421, d: 1013, tag: bdd
+            bdd_hybrid           :: rop: ≈2^140.3, red: ≈2^139.7, svp: ≈2^138.8, β: 391, η: 421, ζ: 0, |S|: 1, ...
+            bdd_mitm_hybrid      :: rop: ≈2^260.3, red: ≈2^259.4, svp: ≈2^259.3, β: 405, η: 2, ζ: 102, |S|: ≈2^247.2,...
+            dual                 :: rop: ≈2^149.9, mem: ≈2^88.0, m: 512, β: 424, d: 1024, ↻: 1, tag: dual
+            dual_hybrid          :: rop: ≈2^145.6, mem: ≈2^140.5, m: 512, β: 408, d: 1004, ↻: 1, ζ: 20, tag: dual_hybrid
 
         """
         from sage.all import oo
@@ -125,6 +132,8 @@ class Estimate:
         from .conf import red_cost_model as red_cost_model_default
         from .conf import red_shape_model as red_shape_model_default
         from .util import batch_estimate, f_name
+
+        params = params.normalize()
 
         if red_cost_model is None:
             red_cost_model = red_cost_model_default
@@ -143,13 +152,19 @@ class Estimate:
             primal_bdd, red_cost_model=red_cost_model, red_shape_model=red_shape_model
         )
         algorithms["bdd_hybrid"] = partial(
-            primal_hybrid, mitm=False, babai=False, red_cost_model=red_cost_model,
-            red_shape_model=red_shape_model
+            primal_hybrid,
+            mitm=False,
+            babai=False,
+            red_cost_model=red_cost_model,
+            red_shape_model=red_shape_model,
         )
         # we ignore the case of mitm=True babai=False for now, due to it being overly-optimistic
         algorithms["bdd_mitm_hybrid"] = partial(
-            primal_hybrid, mitm=True, babai=True, red_cost_model=red_cost_model,
-            red_shape_model=red_shape_model
+            primal_hybrid,
+            mitm=True,
+            babai=True,
+            red_cost_model=red_cost_model,
+            red_shape_model=red_shape_model,
         )
         algorithms["dual"] = partial(dual, red_cost_model=red_cost_model)
         algorithms["dual_hybrid"] = partial(
@@ -164,7 +179,9 @@ class Estimate:
         for k, v in add_list:
             algorithms[k] = v
 
-        res_raw = batch_estimate(params, algorithms.values(), log_level=1, jobs=jobs)
+        res_raw = batch_estimate(
+            params, algorithms.values(), log_level=1, jobs=jobs, catch_exceptions=catch_exceptions
+        )
         res_raw = res_raw[params]
         res = {}
         for algorithm in algorithms:
