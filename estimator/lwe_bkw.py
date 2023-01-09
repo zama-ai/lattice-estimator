@@ -27,7 +27,7 @@ class CodedBKW:
 
     @staticmethod
     @cached_function
-    def ntest(n, ell, t1, t2, b, q):  # noqa
+    def ntest(n, ell, t1, t2, b, q):
         """
         If the parameter ``ntest`` is not provided, we use this function to estimate it.
 
@@ -46,7 +46,7 @@ class CodedBKW:
         # solve for ntest by aiming for ntop == 0
         ntest = var("ntest")
         sigma_set = sqrt(q ** (2 * (1 - ell / ntest)) / 12)
-        ncod = sum([CodedBKW.N(i, sigma_set, b, q) for i in range(1, t2 + 1)])
+        ncod = sum(CodedBKW.N(i, sigma_set, b, q) for i in range(1, t2 + 1))
         ntop = n - ncod - ntest - t1 * b
 
         try:
@@ -55,10 +55,9 @@ class CodedBKW:
             start = 2
         ntest_min = 1
         for ntest in range(start, n - t1 * b + 1):
-            if abs(ntop(ntest=ntest).n()) < abs(ntop(ntest=ntest_min).n()):
-                ntest_min = ntest
-            else:
+            if abs(ntop(ntest=ntest).n()) >= abs(ntop(ntest=ntest_min).n()):
                 break
+            ntest_min = ntest
         return int(ntest_min)
 
     def t1(params: LWEParameters, ell, t2, b, ntest=None):
@@ -73,7 +72,7 @@ class CodedBKW:
             ntest = CodedBKW.ntest(params.n, ell, t1, t2, b, params.q)
         sigma_set = sqrt(params.q ** (2 * (1 - ell / ntest)) / 12)
         Ni = [CodedBKW.N(i, sigma_set, b, params.q) for i in range(1, t2 + 1)]
-        t1 = len([e for e in Ni if e <= b])
+        t1 = sum(e <= b for e in Ni)  # comp. how many in Ni are <= to b
         # there is no point in having more tables than needed to cover n
         if b * t1 > params.n:
             t1 = params.n // b
@@ -104,7 +103,7 @@ class CodedBKW:
         # [C:GuoJohSta15].
 
         cost["b"] = b
-        ell = b - 1  # noqa
+        ell = b - 1
         cost["ell"] = ell
 
         secret_bounds = params.Xs.bounds
@@ -132,7 +131,7 @@ class CodedBKW:
         # if there's no ntest then there's no `σ_{set}` and hence no ncod
         if ntest:
             sigma_set = sqrt(params.q ** (2 * (1 - ell / ntest)) / 12)
-            ncod = sum([CodedBKW.N(i, sigma_set, b, params.q) for i in range(1, t2 + 1)])
+            ncod = sum(CodedBKW.N(i, sigma_set, b, params.q) for i in range(1, t2 + 1))
         else:
             ncod = 0
 
@@ -167,21 +166,19 @@ class CodedBKW:
 
         # Equation (8)
         C1 = sum(
-            [(params.n + 1 - i * b) * (m - i * ZZ(params.q**b - 1) / 2) for i in range(1, t1 + 1)]
+            (params.n + 1 - i * b) * (m - i * ZZ(params.q**b - 1) / 2) for i in range(1, t1 + 1)
         )
         assert C1 >= 0
 
         # Equation (9)
         C2_ = sum(
-            [
-                4 * (M + i * ZZ(params.q**b - 1) / 2) * CodedBKW.N(i, sigma_set, b, params.q)
-                for i in range(1, t2 + 1)
-            ]
+            4 * (M + i * ZZ(params.q**b - 1) / 2) * CodedBKW.N(i, sigma_set, b, params.q)
+            for i in range(1, t2 + 1)
         )
         C2 = float(C2_)
         for i in range(1, t2 + 1):
             C2 += float(
-                ntop + ntest + sum([CodedBKW.N(j, sigma_set, b, params.q) for j in range(1, i + 1)])
+                ntop + ntest + sum(CodedBKW.N(j, sigma_set, b, params.q) for j in range(1, i + 1))
             ) * (M + (i - 1) * ZZ(params.q**b - 1) / 2)
         assert C2 >= 0
 
@@ -208,7 +205,7 @@ class CodedBKW:
         cost = cost.reorder("rop", "m", "mem", "b", "t1", "t2")
         cost["tag"] = "coded-bkw"
         cost["problem"] = params
-        Logging.log("bkw", log_level + 1, f"{repr(cost)}")
+        Logging.log("bkw", log_level + 1, f"{cost!r}")
 
         return cost
 
@@ -220,7 +217,7 @@ class CodedBKW:
         log_level=1,
     ):
         def sf(x, best):
-            return (x["rop"] <= best["rop"]) and (best["m"] > params.m or x["m"] <= params.m)
+            return (x["rop"] <= best["rop"]) and not (best["m"] <= params.m < x["m"])
 
         # the outer search is over b, which determines the size of the tables: q^b
         b_max = 3 * ceil(log(params.q, 2))
@@ -271,19 +268,19 @@ class CodedBKW:
 
             >>> from sage.all import oo
             >>> from estimator import *
-            >>> LWE.coded_bkw(LightSaber.updated(m=oo))
+            >>> LWE.coded_bkw(schemes.LightSaber.updated(m=oo))
             rop: ≈2^171.7, m: ≈2^159.4, mem: ≈2^160.4, b: 12, t1: 3, t2: 18, ℓ: 11, #cod: 423, #top: 1...
 
         We may need to amplify the number of samples, which modifies the noise distribution::
 
             >>> from sage.all import oo
             >>> from estimator import *
-            >>> LightSaber
-            LWEParameters(n=512, q=8192, Xs=D(σ=1.58), Xe=D(σ=2.00), m=512, tag='LightSaber')
-            >>> cost = LWE.coded_bkw(LightSaber); cost
-            rop: ≈2^184.3, m: ≈2^172.2, mem: ≈2^173.2, b: 13, t1: 0, t2: 18, ℓ: 12, #cod: 456, #top: 0...
+            >>> schemes.Kyber512
+            LWEParameters(n=512, q=3329, Xs=D(σ=1.22), Xe=D(σ=1.22), m=512, tag='Kyber 512')
+            >>> cost = LWE.coded_bkw(schemes.Kyber512); cost
+            rop: ≈2^178.8, m: ≈2^166.8, mem: ≈2^167.8, b: 14, t1: 0, t2: 16, ℓ: 13, #cod: 448, #top: 0, #test: 64, ...
             >>> cost["problem"]
-            LWEParameters(n=512, q=8192, Xs=D(σ=1.58), Xe=D(σ=10.39), m=..., tag='LightSaber')
+            LWEParameters(n=512, q=3329, Xs=D(σ=1.22), Xe=D(σ=6.24), m=..., tag='Kyber 512')
 
         TESTS::
 
@@ -294,19 +291,13 @@ class CodedBKW:
 
         """
         params = LWEParameters.normalize(params)
-        try:
-            cost = self.b(params, ntest=ntest, log_level=log_level)
-        except InsufficientSamplesError as e:
-            m = e.args[1]
-            while True:
+        params_ = params
+        while True:
+            try:
+                return self.b(params_, ntest=ntest, log_level=log_level)
+            except InsufficientSamplesError as e:
+                m = e.args[1]
                 params_ = params.amplify_m(m)
-                try:
-                    cost = self.b(params_, ntest=ntest, log_level=log_level)
-                    break
-                except InsufficientSamplesError as e:
-                    m = e.args[1]
-
-        return cost
 
 
 coded_bkw = CodedBKW()

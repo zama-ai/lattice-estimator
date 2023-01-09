@@ -3,18 +3,24 @@
 High-level LWE interface
 """
 
+from functools import partial
+from sage.all import oo
+
 from .lwe_primal import primal_usvp, primal_bdd, primal_hybrid
 from .lwe_bkw import coded_bkw
-from .lwe_guess import exhaustive_search, mitm, distinguish  # noqa
+from .lwe_guess import exhaustive_search, mitm, distinguish, guess_composition # noqa
 from .lwe_dual import dual, dual_hybrid
-from .lwe_guess import guess_composition
 from .gb import arora_gb  # noqa
 from .lwe_parameters import LWEParameters as Parameters  # noqa
+from .conf import (red_cost_model as red_cost_model_default,
+                   red_shape_model as red_shape_model_default)
+from .util import batch_estimate, f_name
+from .reduction import RC
 
 
 class Estimate:
-    @classmethod
-    def rough(cls, params, jobs=1, catch_exceptions=True):
+
+    def rough(self, params, jobs=1, catch_exceptions=True):
         """
         This function makes the following somewhat routine assumptions:
 
@@ -35,19 +41,12 @@ class Estimate:
         EXAMPLE ::
 
             >>> from estimator import *
-            >>> _ = lwe.estimate.rough(Kyber512)
+            >>> _ = LWE.estimate.rough(schemes.Kyber512)
             usvp                 :: rop: ≈2^118.6, red: ≈2^118.6, δ: 1.003941, β: 406, d: 998, tag: usvp
             dual_hybrid          :: rop: ≈2^121.9, mem: ≈2^116.8, m: 512, β: 417, d: 1013, ↻: 1, ζ: 11...
 
 
         """
-        # NOTE: Don't import these at the top-level to avoid circular imports
-        from functools import partial
-        from .reduction import RC
-        from .util import batch_estimate, f_name
-
-        from sage.all import oo
-
         params = params.normalize()
 
         algorithms = {}
@@ -58,8 +57,6 @@ class Estimate:
             algorithms["hybrid"] = partial(
                 primal_hybrid, red_cost_model=RC.ADPS16, red_shape_model="gsa"
             )
-
-        if params.Xs.is_sparse:
             algorithms["dual_mitm_hybrid"] = partial(
                 dual_hybrid, red_cost_model=RC.ADPS16, mitm_optimization=True
             )
@@ -78,25 +75,26 @@ class Estimate:
             params, algorithms.values(), log_level=1, jobs=jobs, catch_exceptions=catch_exceptions
         )
         res_raw = res_raw[params]
-        res = {}
-        for algorithm in algorithms:
-            for k, v in res_raw.items():
-                if f_name(algorithms[algorithm]) == k:
-                    res[algorithm] = v
+        res = {
+            algorithm: v for algorithm, attack in algorithms.items()
+            for k, v in res_raw.items()
+            if f_name(attack) == k
+        }
 
         for algorithm in algorithms:
-            for k, v in res.items():
-                if algorithm == k:
-                    if v["rop"] == oo:
-                        continue
-                    print(f"{algorithm:20s} :: {repr(v)}")
+            if algorithm not in res:
+                continue
+            result = res[algorithm]
+            if result["rop"] != oo:
+                print(f"{algorithm:20s} :: {result!r}")
+
         return res
 
     def __call__(
         self,
         params,
-        red_cost_model=None,
-        red_shape_model=None,
+        red_cost_model=red_cost_model_default,
+        red_shape_model=red_shape_model_default,
         deny_list=tuple(),
         add_list=tuple(),
         jobs=1,
@@ -116,7 +114,7 @@ class Estimate:
         EXAMPLE ::
 
             >>> from estimator import *
-            >>> _ = lwe.estimate(Kyber512)
+            >>> _ = LWE.estimate(schemes.Kyber512)
             bkw                  :: rop: ≈2^178.8, m: ≈2^166.8, mem: ≈2^167.8, b: 14, t1: 0, t2: 16, ℓ: 13, #cod: 448...
             usvp                 :: rop: ≈2^143.8, red: ≈2^143.8, δ: 1.003941, β: 406, d: 998, tag: usvp
             bdd                  :: rop: ≈2^140.3, red: ≈2^139.7, svp: ≈2^138.8, β: 391, η: 421, d: 1013, tag: bdd
@@ -126,18 +124,7 @@ class Estimate:
             dual_hybrid          :: rop: ≈2^145.6, mem: ≈2^140.5, m: 512, β: 408, d: 1004, ↻: 1, ζ: 20, tag: dual_hybrid
 
         """
-        from sage.all import oo
-        from functools import partial
-        from .conf import red_cost_model as red_cost_model_default
-        from .conf import red_shape_model as red_shape_model_default
-        from .util import batch_estimate, f_name
-
         params = params.normalize()
-
-        if red_cost_model is None:
-            red_cost_model = red_cost_model_default
-        if red_shape_model is None:
-            red_shape_model = red_shape_model_default
 
         algorithms = {}
 
@@ -173,31 +160,32 @@ class Estimate:
             dual_hybrid, red_cost_model=red_cost_model, mitm_optimization=True
         )
 
-        for k in deny_list:
-            del algorithms[k]
-        for k, v in add_list:
-            algorithms[k] = v
+        algorithms = {k: v for k, v in algorithms.items() if k not in deny_list}
+        algorithms.update(add_list)
 
         res_raw = batch_estimate(
             params, algorithms.values(), log_level=1, jobs=jobs, catch_exceptions=catch_exceptions
         )
         res_raw = res_raw[params]
-        res = {}
-        for algorithm in algorithms:
-            for k, v in res_raw.items():
-                if f_name(algorithms[algorithm]) == k:
-                    res[algorithm] = v
+        res = {
+            algorithm: v
+            for algorithm, attack in algorithms.items()
+            for k, v in res_raw.items()
+            if f_name(attack) == k
+        }
 
         for algorithm in algorithms:
-            for k, v in res.items():
-                if algorithm == k:
-                    if v["rop"] == oo:
-                        continue
-                    if k == "hybrid" and res["bdd"]["rop"] < v["rop"]:
-                        continue
-                    if k == "dual_mitm_hybrid" and res["dual_hybrid"]["rop"] < v["rop"]:
-                        continue
-                    print(f"{algorithm:20s} :: {repr(v)}")
+            if algorithm not in res:
+                continue
+            result = res[algorithm]
+            if result["rop"] == oo:
+                continue
+            if algorithm == "hybrid" and res["bdd"]["rop"] < result["rop"]:
+                continue
+            if algorithm == "dual_mitm_hybrid" and res["dual_hybrid"]["rop"] < result["rop"]:
+                continue
+            print(f"{algorithm:20s} :: {result!r}")
+
         return res
 
 

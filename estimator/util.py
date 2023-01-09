@@ -1,9 +1,22 @@
+import itertools as it
 from multiprocessing import Pool
 from functools import partial
+from dataclasses import dataclass
+from typing import Any, Callable, NamedTuple
 
-from sage.all import ceil, floor, oo
+from sage.all import ceil, floor, log, oo
 
 from .io import Logging
+from .lwe_parameters import LWEParameters
+
+
+def log2(x):
+    return log(x, 2.0)
+
+
+class Bounds(NamedTuple):
+    low: Any
+    high: Any
 
 
 class local_minimum_base:
@@ -41,14 +54,14 @@ class local_minimum_base:
         self._log_level = log_level
         self._start = start
         self._stop = stop - 1
-        self._initial_bounds = (start, stop - 1)
+        self._initial_bounds = Bounds(start, stop - 1)
         self._smallerf = smallerf
         # abs(self._direction) == 2: binary search step
         # abs(self._direction) == 1: gradient descent direction
         self._direction = -1  # going down
         self._last_x = None
         self._next_x = self._stop
-        self._best = (None, None)
+        self._best = Bounds(None, None)
         self._all_x = set()
 
     def __enter__(self):
@@ -64,36 +77,31 @@ class local_minimum_base:
         return self
 
     def __next__(self):
-        abort = False
-        if self._next_x is None:
-            abort = True  # we're told to abort
-        elif self._next_x in self._all_x:
-            abort = True  # we're looping
-        elif self._next_x < self._initial_bounds[0] or self._initial_bounds[1] < self._next_x:
-            abort = True  # we're stepping out of bounds
 
-        if not abort:
+        if (self._next_x is not None
+                and self._next_x not in self._all_x
+                and self._initial_bounds.low <= self._next_x <= self._initial_bounds.high):
+            # we've not been told to abort
+            # we're not looping
+            # we're in bounds
             self._last_x = self._next_x
             self._next_x = None
             return self._last_x
 
-        if self._best[0] in self._initial_bounds and not self._suppress_bounds_warning:
+        if self._best.low in self._initial_bounds and not self._suppress_bounds_warning:
             # We warn the user if the optimal solution is at the edge and thus possibly not optimal.
-            Logging.log(
-                "bins",
-                self._log_level,
-                f'warning: "optimal" solution {self._best[0]} matches a bound ∈ {self._initial_bounds}.',
-            )
+            msg = f'warning: "optimal" solution {self._best.low} matches a bound ∈ {self._initial_bounds}.',
+            Logging.log("bins", self._log_level, msg)
 
         raise StopIteration
 
     @property
     def x(self):
-        return self._best[0]
+        return self._best.low
 
     @property
     def y(self):
-        return self._best[1]
+        return self._best.high
 
     def update(self, res):
         """
@@ -115,13 +123,13 @@ class local_minimum_base:
         self._all_x.add(self._last_x)
 
         # We got nothing yet
-        if self._best[0] is None:
-            self._best = self._last_x, res
+        if self._best.low is None:
+            self._best = Bounds(self._last_x, res)
 
         # We found something better
-        if res is not False and self._smallerf(res, self._best[1]):
+        if res is not False and self._smallerf(res, self._best.high):
             # store it
-            self._best = self._last_x, res
+            self._best = Bounds(self._last_x, res)
 
             # if it's a result of a long jump figure out the next direction
             if abs(self._direction) != 1:
@@ -203,7 +211,7 @@ class local_minimum(local_minimum_base):
 
     @property
     def x(self):
-        return self._best[0] * self._precision
+        return self._best.low * self._precision
 
     @property
     def neighborhood(self):
@@ -211,10 +219,10 @@ class local_minimum(local_minimum_base):
         An iterator over the neighborhood of the currently best value.
         """
 
-        start, stop = self._orig_bounds
-
-        for x in range(max(start, self.x - self._precision), min(stop, self.x + self._precision)):
-            yield x
+        start_bound, stop_bound = self._orig_bounds
+        start = max(start_bound, self.x - self._precision)
+        stop = min(stop_bound, self.x + self._precision)
+        return range(start, stop)
 
 
 class early_abort_range:
@@ -257,7 +265,7 @@ class early_abort_range:
         self._smallerf = smallerf
         self._last_x = None
         self._next_x = self._start
-        self._best = (None, None)
+        self._best = Bounds(None, None)
 
     def __iter__(self):
         """ """
@@ -266,7 +274,7 @@ class early_abort_range:
     def __next__(self):
         if self._next_x is None:
             raise StopIteration
-        elif self._next_x >= self._stop:
+        if self._next_x >= self._stop:
             raise StopIteration
 
         self._last_x = self._next_x
@@ -275,32 +283,29 @@ class early_abort_range:
 
     @property
     def x(self):
-        return self._best[0]
+        return self._best.low
 
     @property
     def y(self):
-        return self._best[1]
+        return self._best.high
 
     def update(self, res):
         """ """
         Logging.log("lins", self._log_level, f"({self._last_x}, {repr(res)})")
 
-        if self._best[0] is None:
+        if self._best.low is None:
             self._best = self._last_x, res
             return
 
         if res is False:
             self._next_x = None
+        elif self._smallerf(res, self._best.high):
+            self._best = self._last_x, res
         else:
-            if self._smallerf(res, self._best[1]):
-                self._best = self._last_x, res
-            else:
-                self._next_x = None
+            self._next_x = None
 
 
-def binary_search(
-    f, start, stop, param, step=1, smallerf=lambda x, best: x <= best, log_level=5, *args, **kwds
-):
+def binary_search(f, start, stop, param, step=1, smallerf=lambda x, best: x <= best, log_level=5, *args, **kwds):
     """
     Searches for the best value in the interval [start,stop] depending on the given comparison function.
 
@@ -340,7 +345,7 @@ def _batch_estimatef(f, x, log_level=0, f_repr=None, catch_exceptions=True):
 
     Logging.log("batch", log_level, f"f: {f_repr}")
     Logging.log("batch", log_level, f"x: {x}")
-    Logging.log("batch", log_level, f"f(x): {repr(y)}")
+    Logging.log("batch", log_level, f"f(x): {y!r}")
 
     return y
 
@@ -350,6 +355,26 @@ def f_name(f):
         return f.__name__
     except AttributeError:
         return repr(f)
+
+
+class Task(NamedTuple):
+    f: Callable
+    x: LWEParameters
+    log_level: int
+    f_name: str
+    catch_exceptions: bool
+
+
+@dataclass(frozen=True)
+class TaskResults:
+    _map: dict
+
+    def __getitem__(self, params):
+        return {
+            task.f_name: result
+            for task, result in self._map.items()
+            if task.x == params and result is not None
+        }
 
 
 def batch_estimate(params, algorithm, jobs=1, log_level=0, catch_exceptions=True, **kwds):
@@ -364,42 +389,26 @@ def batch_estimate(params, algorithm, jobs=1, log_level=0, catch_exceptions=True
 
     Example::
 
-        >>> from estimator import Kyber512, LWE
+        >>> from estimator import LWE
+        >>> from estimator.schemes import Kyber512
         >>> _ = batch_estimate(Kyber512, [LWE.primal_usvp, LWE.primal_bdd])
         >>> _ = batch_estimate(Kyber512, [LWE.primal_usvp, LWE.primal_bdd], jobs=2)
 
     """
-    from .lwe_parameters import LWEParameters
 
     if isinstance(params, LWEParameters):
         params = (params,)
-    try:
-        iter(algorithm)
-    except TypeError:
+    if not hasattr(algorithm, "__iter__"):
         algorithm = (algorithm,)
-
-    tasks = []
-
-    for x in params:
-        for f in algorithm:
-            tasks.append((partial(f, **kwds), x, log_level, f_name(f), catch_exceptions))
+    tasks = [
+        Task(partial(f, **kwds), x, log_level, f_name(f), catch_exceptions)
+        for f, x in it.product(algorithm, params)
+    ]
 
     if jobs == 1:
-        res = {}
-        for f, x, lvl, f_repr, catch_exceptions in tasks:
-            y = _batch_estimatef(f, x, lvl, f_repr, catch_exceptions)
-            res[f_repr, x] = y
+        results = [_batch_estimatef(*task) for task in tasks]
     else:
-        pool = Pool(jobs)
-        res = pool.starmap(_batch_estimatef, tasks)
-        res = dict(
-            [((f_repr, x), res[i]) for i, (f, x, _, f_repr, catch_exceptions) in enumerate(tasks)]
-        )
+        with Pool(jobs) as pool:
+            results = pool.starmap(_batch_estimatef, tasks)
 
-    ret = dict()
-    for f, x in res:
-        ret[x] = ret.get(x, dict())
-        if res[f, x] is not None:
-            ret[x][f] = res[f, x]
-
-    return ret
+    return TaskResults(dict(zip(tasks, results)))

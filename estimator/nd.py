@@ -2,7 +2,7 @@
 
 from dataclasses import dataclass
 
-from sage.all import parent, RR, RealField, sqrt, pi, oo, ceil, binomial, exp, log
+from sage.all import binomial, ceil, exp, log, oo, parent, pi, RealField, RR, sqrt
 
 
 def stddevf(sigma):
@@ -83,7 +83,7 @@ class NoiseDistribution:
     stddev: float
     mean: float = 0
     n: int = None
-    bounds: tuple = None
+    bounds: tuple = (None, None)
     density: float = 1.0  # Hamming weight / dimension.
     tag: str = ""
 
@@ -214,7 +214,7 @@ class NoiseDistribution:
             h = self.get_hamming_weight(n)
             # TODO: this is assuming that the non-zero entries are uniform over {-1,1}
             # need p and m for more accurate calculation
-            size = 2 ** h * binomial(n, h) * RR(fraction)
+            size = 2**h * binomial(n, h) * RR(fraction)
         elif self.is_bounded:
             # TODO: this might be suboptimal/inaccurate for binomial distribution
             a, b = self.bounds
@@ -225,7 +225,7 @@ class NoiseDistribution:
             t = self.gaussian_tail_bound
             p = self.gaussian_tail_prob
 
-            if p ** n < fraction:
+            if p**n < fraction:
                 raise NotImplementedError(
                     f"TODO(nd.support-size): raise t. {RR(p ** n)}, {n}, {fraction}"
                 )
@@ -254,13 +254,12 @@ class NoiseDistribution:
             D(σ=3.00, μ=1.00)
 
         """
+        b_val = oo if n is None else ceil(log(n, 2) * stddev)
         return NoiseDistribution(
             stddev=RR(stddev),
             mean=RR(mean),
             n=n,
-            bounds=(-oo, oo)
-            if n is None
-            else (-ceil(log(n, 2) * stddev), ceil(log(n, 2) * stddev)),
+            bounds=(-b_val, b_val),
             density=1 - min(RR(1 / (sqrt(2 * pi) * stddev)), 1.0),
             tag="DiscreteGaussian",
         )
@@ -321,9 +320,9 @@ class NoiseDistribution:
             raise ValueError(f"upper limit must be larger than lower limit but got: {b} < {a}")
         m = b - a + 1
         mean = (a + b) / RR(2)
-        stddev = sqrt((m ** 2 - 1) / RR(12))
+        stddev = sqrt((m**2 - 1) / RR(12))
 
-        if a <= 0 and 0 <= b:
+        if a <= 0 and b >= 0:
             density = 1.0 - 1.0 / m
         else:
             density = 0.0
@@ -348,9 +347,7 @@ class NoiseDistribution:
 
         """
         a = -(q // 2)
-        b = q // 2
-        if q % 2 == 0:
-            b -= 1
+        b = -a -1 if q % 2 == 0 else -a
         return NoiseDistribution.Uniform(a, b, n=n)
 
     @staticmethod
@@ -383,8 +380,6 @@ class NoiseDistribution:
                       (n - (p + m)) / n * (mean)**2)
 
         density = RR((p + m) / n)
-        D = NoiseDistribution(
+        return NoiseDistribution(
             stddev=stddev, mean=mean, density=density, bounds=(-1, 1), tag="SparseTernary", n=n
         )
-
-        return D

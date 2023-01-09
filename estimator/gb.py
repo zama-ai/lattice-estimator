@@ -6,18 +6,19 @@ See :ref:`Arora-GB` for an overview.
 
 """
 from sage.all import (
+    binomial,
+    ceil,
+    exp,
+    floor,
+    log,
+    oo,
+    pi,
     PowerSeriesRing,
+    prod,
     QQ,
     RR,
-    oo,
-    binomial,
-    sqrt,
-    ceil,
-    floor,
-    exp,
-    log,
-    pi,
     RealField,
+    sqrt,
 )
 from .cost import Cost
 from .lwe_parameters import LWEParameters
@@ -48,22 +49,17 @@ def gb_cost(n, D, omega=2, prec=None):
     s = R(1)
     s = s.add_bigoh(prec)
 
-    for d, m in D:
-        s *= (1 - z**d) ** m
-    s /= (1 - z) ** n
+    s = prod(((1 - z**d)**m for d, m in D), s) / (1 - z) ** n
 
     retval = Cost(rop=oo, dreg=oo)
     retval.register_impermanent({"rop": True, "dreg": False, "mem": False})
 
     for dreg in range(prec):
         if s[dreg] < 0:
+            retval["dreg"] = dreg
+            retval["rop"] = binomial(n + dreg, dreg) ** omega
+            retval["mem"] = binomial(n + dreg, dreg) ** 2
             break
-    else:
-        return retval
-
-    retval["dreg"] = dreg
-    retval["rop"] = binomial(n + dreg, dreg) ** omega
-    retval["mem"] = binomial(n + dreg, dreg) ** 2
 
     return retval
 
@@ -76,7 +72,7 @@ class AroraGB:
         """
         RR = RealField(256)
         C = RR(C)
-        return RR(1 - (RR(2) / (C * RR(sqrt(2 * pi))) * exp(-(C**2) / RR(2))))  # noqa
+        return RR(1 - (RR(2) / (C * RR(sqrt(2 * pi))) * exp(-(C**2) / RR(2))))
 
     @classmethod
     def cost_bounded(cls, params, success_probability=0.99, omega=2, log_level=1, **kwds):
@@ -115,44 +111,49 @@ class AroraGB:
         dn = cls.equations_for_secret(params)
 
         best, stuck = None, 0
-        for t in range(ceil(params.Xe.stddev), params.n):
-            d = 2 * t + 1
+
+        def t_and_m_can(t):
             C = RR(t / params.Xe.stddev)
             assert C >= 1  # if C is too small, we ignore it
             # Pr[success]^m = Pr[overall success]
             single_prob = AroraGB.ps_single(C)
-            m_req = log(success_probability, 2) / log(single_prob, 2)
-            m_req = floor(m_req)
+            if single_prob == 1:
+                m_can = 2**31  # some arbitrary max
+            else:
+                # log(success_probability, single_prob)
+                # == log(success_probability, 2) / log(single_prob, 2)
+                m_can = floor(log(success_probability, single_prob))
 
-            if m_req > params.m:
+            return t, m_can
+
+        for t, m_can in map(t_and_m_can, range(ceil(params.Xe.stddev), params.n)):
+            if m_can > params.m:
                 break
 
-            current = gb_cost(params.n, [(d, m_req)] + dn, omega)
+            d = 2 * t + 1
+            current = gb_cost(params.n, [(d, m_can)] + dn, omega)
 
             if current["dreg"] == oo:
                 continue
 
             current["t"] = t
-            current["m"] = m_req
+            current["m"] = m_can
             current.register_impermanent(t=False, m=True)
             current = current.reorder("rop", "m", "dreg", "t")
 
-            Logging.log("repeat", log_level + 1, f"{repr(current)}")
+            Logging.log("repeat", log_level + 1, repr(current))
 
             if best is None:
                 best = current
+            elif best > current:
+                best = current
+                stuck = 0
             else:
-                if best > current:
-                    best = current
-                    stuck = 0
-                else:
-                    stuck += 1
-                    if stuck >= 5:
-                        break
+                stuck += 1
+                if stuck >= 5:
+                    break
 
-        if best is None:
-            best = Cost(rop=oo, dreg=oo)
-        return best
+        return best if best is not None else Cost(rop=oo, dreg=oo)
 
     @classmethod
     def equations_for_secret(cls, params):
@@ -162,18 +163,17 @@ class AroraGB:
         :param params: LWE parameters.
 
         """
-        if params.Xs <= params.Xe:
-            a, b = params.Xs.bounds
-            if b - a < oo:
-                d = b - a + 1
-            elif params.Xs.is_Gaussian_like:
-                d = 2 * ceil(3 * params.Xs.stddev) + 1
-            else:
-                raise NotImplementedError(f"Do not know how to handle {params.Xs}.")
-            dn = [(d, params.n)]
+        if params.Xs > params.Xe:
+            return []
+
+        a, b = params.Xs.bounds
+        if b - a < oo:
+            d = b - a + 1
+        elif params.Xs.is_Gaussian_like:
+            d = 2 * ceil(3 * params.Xs.stddev) + 1
         else:
-            dn = []
-        return dn
+            raise NotImplementedError(f"Do not know how to handle {params.Xs}.")
+        return [(d, params.n)]
 
     def __call__(
         self, params: LWEParameters, success_probability=0.99, omega=2, log_level=1, **kwds
@@ -236,7 +236,7 @@ class AroraGB:
                 omega=omega,
                 log_level=log_level,
             )
-            Logging.log("gb", log_level, f"b: {repr(cost)}")
+            Logging.log("gb", log_level, f"b: {cost!r}")
             best = min(best, cost, key=lambda x: x["dreg"])
 
         if params.Xe.is_Gaussian_like:
@@ -246,7 +246,7 @@ class AroraGB:
                 omega=omega,
                 log_level=log_level,
             )
-            Logging.log("gb", log_level, f"G: {repr(cost)}")
+            Logging.log("gb", log_level, f"G: {cost!r}")
             best = min(best, cost, key=lambda x: x["dreg"])
 
         best["tag"] = "arora-gb"

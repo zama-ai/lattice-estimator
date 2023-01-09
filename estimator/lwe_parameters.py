@@ -1,7 +1,9 @@
 # -*- coding: utf-8 -*-
-from sage.all import oo, binomial, log, sqrt, ceil
 from dataclasses import dataclass
 from copy import copy
+
+from sage.all import oo, binomial, log, sqrt, ceil
+
 from .nd import NoiseDistribution
 from .errors import InsufficientSamplesError
 
@@ -54,9 +56,7 @@ class LWEParameters:
 
         # Normal form transformation
         if self.Xe < self.Xs and self.m >= 2 * self.n:
-            return LWEParameters(
-                n=self.n, q=self.q, Xs=self.Xe, Xe=self.Xe, m=self.m - self.n, tag=self.tag
-            )
+            return LWEParameters(n=self.n, q=self.q, Xs=self.Xe, Xe=self.Xe, m=self.m - self.n, tag=self.tag)
         # swap secret and noise
         # TODO: this is somewhat arbitrary
         if self.Xe < self.Xs and self.m < 2 * self.n:
@@ -74,9 +74,9 @@ class LWEParameters:
         EXAMPLE::
 
             >>> from estimator import *
-            >>> Kyber512
+            >>> schemes.Kyber512
             LWEParameters(n=512, q=3329, Xs=D(σ=1.22), Xe=D(σ=1.22), m=512, tag='Kyber 512')
-            >>> Kyber512.updated(m=1337)
+            >>> schemes.Kyber512.updated(m=1337)
             LWEParameters(n=512, q=3329, Xs=D(σ=1.22), Xe=D(σ=1.22), m=1337, tag='Kyber 512')
 
         """
@@ -94,9 +94,9 @@ class LWEParameters:
 
             >>> from sage.all import binomial, log
             >>> from estimator import *
-            >>> Kyber512
+            >>> schemes.Kyber512
             LWEParameters(n=512, q=3329, Xs=D(σ=1.22), Xe=D(σ=1.22), m=512, tag='Kyber 512')
-            >>> Kyber512.amplify_m(2**100)
+            >>> schemes.Kyber512.amplify_m(2**100)
             LWEParameters(n=512, q=3329, Xs=D(σ=1.22), Xe=D(σ=4.58), m=..., tag='Kyber 512')
 
         We can produce 2^100 samples by random ± linear combinations of 12 vectors::
@@ -118,15 +118,13 @@ class LWEParameters:
             # - binom(n,k) positions
             #  -two signs per position (+1,-1)
             # - all "-" and all "+" are the same
-            if binomial(self.m, k) * 2 ** k - 1 >= m:
+            if binomial(self.m, k) * 2**k - 1 >= m:
                 Xe = NoiseDistribution.DiscreteGaussian(float(sqrt(k) * self.Xe.stddev))
                 d["Xe"] = Xe
                 d["m"] = ceil(m)
                 return LWEParameters(**d)
         else:
-            raise NotImplementedError(
-                f"Cannot amplify to ≈2^{log(m,2):1} using {{+1,-1}} additions."
-            )
+            raise NotImplementedError(f"Cannot amplify to ≈2^{log(m,2):1} using {{+1,-1}} additions.")
 
     def switch_modulus(self):
         """
@@ -160,7 +158,7 @@ class LWEParameters:
             Xs=self.Xs,
             Xe=NoiseDistribution.DiscreteGaussian(sqrt(2) * self.Xe.stddev * scale),
             m=self.m,
-            tag=self.tag + ",scaled" if self.tag else None,
+            tag=f"{self.tag},scaled" if self.tag else None,
         )
 
     def __hash__(self):

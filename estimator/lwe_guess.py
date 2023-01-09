@@ -7,22 +7,15 @@ some form of additive composition, i.e. this strategy is rarely the most efficie
 
 """
 
-from sage.all import log, floor, ceil, binomial
-from sage.all import sqrt, pi, exp, RR, ZZ, oo, round, e
+from sage.all import binomial, ceil, e, exp, floor, log, oo, pi, round, RR, sqrt, ZZ
 
 from .conf import mitm_opt
 from .cost import Cost
 from .errors import InsufficientSamplesError, OutOfBoundsError
 from .lwe_parameters import LWEParameters
-from .prob import amplify as prob_amplify
-from .prob import drop as prob_drop
-from .prob import amplify_sigma
-from .util import local_minimum
+from .prob import amplify as prob_amplify, drop as prob_drop, amplify_sigma
+from .util import local_minimum, log2
 from .nd import sigmaf
-
-
-def log2(x):
-    return log(x, 2)
 
 
 class guess_composition:
@@ -83,9 +76,7 @@ class guess_composition:
         :returns: (number of repetitions, γ, size of the search space, probability of success)
 
         """
-        if h == 0:
-            return 1, 0, 0, 1.0
-        if not zeta:
+        if h == 0 or not zeta:
             return 1, 0, 0, 1.0
 
         search_space = 0
@@ -96,11 +87,10 @@ class guess_composition:
             probability += prob_drop(n, h, zeta, fail=gamma)
             search_space += binomial(zeta, gamma) * base**gamma
             repeat = prob_amplify(0.99, probability) * g(search_space)
-            if best[0] is None or repeat < best[0]:
-                best = repeat, gamma, search_space, probability
-                gamma += 1
-            else:
+            if best[0] is not None and repeat >= best[0]:
                 break
+            best = repeat, gamma, search_space, probability
+            gamma += 1
         return best
 
     @classmethod
@@ -137,21 +127,18 @@ class guess_composition:
 
             >>> from estimator import *
             >>> from estimator.lwe_guess import guess_composition
-            >>> guess_composition(LWE.primal_usvp)(Kyber512.updated(Xs=ND.SparseTernary(512, 16)))
+            >>> guess_composition(LWE.primal_usvp)(schemes.Kyber512.updated(Xs=ND.SparseTernary(512, 16)))
             rop: ≈2^99.4, red: ≈2^99.4, δ: 1.008705, β: 113, d: 421, tag: usvp, ↻: ≈2^37.5, ζ: 265, |S|: 1, ...
 
         Compare::
 
-            >>> LWE.primal_hybrid(Kyber512.updated(Xs=ND.SparseTernary(512, 16)))
+            >>> LWE.primal_hybrid(schemes.Kyber512.updated(Xs=ND.SparseTernary(512, 16)))
             rop: ≈2^85.8, red: ≈2^84.8, svp: ≈2^84.8, β: 105, η: 2, ζ: 366, |S|: ≈2^85.1, d: 315, prob: ≈2^-23.4, ...
 
         """
         params = LWEParameters.normalize(params)
-
-        if params.Xs.is_sparse:
-            return self.sparse_solve(self.f, params, log_level, **kwds)
-        else:
-            return self.dense_solve(self.f, params, log_level, **kwds)
+        solve = self.sparse_solve if params.Xs.is_sparse else self.dense_solve
+        return solve(self.f, params, log_level, **kwds)
 
 
 class ExhaustiveSearch:
@@ -195,7 +182,7 @@ class ExhaustiveSearch:
             # so we approximate the cost with oo
             return Cost(rop=oo, mem=oo, m=1)
 
-        if quantum:
+        if quantum is True:
             size = size.sqrt()
 
         # set m according to [ia.cr/2020/515]
@@ -217,7 +204,7 @@ class ExhaustiveSearch:
         cost = 2 * size * m
 
         ret = Cost(rop=cost, mem=cost / 2, m=m)
-        return ret
+        return ret.sanity_check()
 
     __name__ = "exhaustive_search"
 
@@ -257,9 +244,7 @@ class MITM:
         if params.Xs.is_sparse:
             h = params.Xs.get_hamming_weight(n=params.n)
             split_h = round(h * k / n)
-            success_probability_ = (
-                binomial(k, split_h) * binomial(n - k, h - split_h) / binomial(n, h)
-            )
+            success_probability_ = binomial(k, split_h) * binomial(n - k, h - split_h) / binomial(n, h)
 
             logT = RR(h * (log2(n) - log2(h) + log2(sd_rng - 1) + log2(e))) / (2 - delta)
             logT -= RR(log2(h) / 2)
@@ -268,7 +253,7 @@ class MITM:
             success_probability_ = 1.0
             logT = k * log(sd_rng, 2)
 
-        m_ = max(1, round(logT + log(logT, 2)))
+        m_ = max(1, round(logT + log2(logT)))
         if params.m < m_:
             raise InsufficientSamplesError(
                 f"MITM: Need {m_} samples but only {params.m} available."
@@ -299,9 +284,7 @@ class MITM:
             split_h = round(h * k / n)
             size_tab = RR((sd_rng - 1) ** split_h * binomial(k, split_h))
             size_sea = RR((sd_rng - 1) ** (h - split_h) * binomial(n - k, h - split_h))
-            success_probability_ = (
-                binomial(k, split_h) * binomial(n - k, h - split_h) / binomial(n, h)
-            )
+            success_probability_ = binomial(k, split_h) * binomial(n - k, h - split_h) / binomial(n, h)
         else:
             size_tab = sd_rng**k
             size_sea = sd_rng ** (n - k)
@@ -367,7 +350,7 @@ class MITM:
 
         params = LWEParameters.normalize(params)
 
-        nd_rng, _ = self.X_range(params.Xe)
+        nd_rng = self.X_range(params.Xe)[0]
         if nd_rng >= params.q:
             # MITM attacks cannot handle an error this large.
             return Cost(rop=oo, mem=oo, m=0, k=0)
@@ -428,7 +411,7 @@ class Distinguisher:
             raise InsufficientSamplesError(
                 "Not enough samples to distinguish with target advantage."
             )
-        return Cost(rop=m, mem=m, m=m)
+        return Cost(rop=m, mem=m, m=m).sanity_check()
 
     __name__ = "distinguish"
 
