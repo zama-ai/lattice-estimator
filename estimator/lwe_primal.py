@@ -22,7 +22,6 @@ from .io import Logging
 from .conf import red_cost_model as red_cost_model_default
 from .conf import red_shape_model as red_shape_model_default
 from .conf import red_simulator as red_simulator_default
-from fpylll.util import gaussian_heuristic
 
 
 class PrimalUSVP:
@@ -47,9 +46,16 @@ class PrimalUSVP:
         # Find the smallest d ∈ [n,m] s.t. a*d^2 + b*d + c >= 0
         delta = deltaf(beta)
         a = -log(delta)
-        C = log(params.Xe.stddev**2 * (beta - 1) + tau**2) / 2.0
+
+        if not tau:
+            C = log(params.Xe.stddev**2 * (beta - 1)) / 2.0
+            c = params.n * log(xi) - (params.n + 1) * log(params.q)
+
+        else:
+            C = log(params.Xe.stddev**2 * (beta - 1) + tau**2) / 2.0
+            c = log(tau) + params.n * log(xi) - (params.n + 1) * log(params.q)
+
         b = log(delta) * (2 * beta - 1) + log(params.q) - C
-        c = log(tau) + params.n * log(xi) - (params.n + 1) * log(params.q)
         n = params.n
         if a * n * n + b * n + c >= 0:  # trivial case
             return n
@@ -84,11 +90,14 @@ class PrimalUSVP:
         red_cost_model=red_cost_model_default,
         log_level=None,
     ):
-
         delta = deltaf(beta)
         xi = PrimalUSVP._xi_factor(params.Xs, params.Xe)
-        m = min(2 * ceil(sqrt(params.n * log(params.q) / log(delta))), m)
+        m = min(ceil(sqrt(params.n * log(params.q) / log(delta))), m)
         tau = params.Xe.stddev if tau is None else tau
+        # Account for homogeneous instances
+        if params._homogeneous:
+            tau = False  # Tau false ==> instance is homogeneous
+
         d = PrimalUSVP._solve_for_d(params, m, beta, tau, xi) if d is None else d
         # if d == β we assume one SVP call, otherwise poly calls. This makes the cost curve jump, so
         # we avoid it here.
@@ -96,11 +105,19 @@ class PrimalUSVP:
             d += 1
         assert d <= m + 1
 
-        lhs = log(sqrt(params.Xe.stddev**2 * (beta - 1) + tau**2))
-        rhs = RR(
-            log(delta) * (2 * beta - d - 1)
-            + (log(tau) + log(xi) * params.n + log(params.q) * (d - params.n - 1)) / d
-        )
+        if not tau:
+            lhs = log(sqrt(params.Xe.stddev**2 * (beta - 1)))
+            rhs = RR(
+                log(delta) * (2 * beta - d - 1)
+                + (log(xi) * params.n + log(params.q) * (d - params.n - 1)) / d
+            )
+
+        else:
+            lhs = log(sqrt(params.Xe.stddev**2 * (beta - 1) + tau**2))
+            rhs = RR(
+                log(delta) * (2 * beta - d - 1)
+                + (log(tau) + log(xi) * params.n + log(params.q) * (d - params.n - 1)) / d
+            )
 
         return costf(red_cost_model, beta, d, predicate=lhs <= rhs)
 
@@ -122,8 +139,18 @@ class PrimalUSVP:
         xi = PrimalUSVP._xi_factor(params.Xs, params.Xe)
         tau = params.Xe.stddev if tau is None else tau
 
+        if params._homogeneous:
+            tau = False
+            d -= 1  # Remove extra dimension in homogeneous instances
+
         r = simulator(d=d, n=params.n, q=params.q, beta=beta, xi=xi, tau=tau)
-        lhs = params.Xe.stddev**2 * (beta - 1) + tau**2
+
+        if not tau:
+            lhs = params.Xe.stddev**2 * (beta - 1)
+
+        else:
+            lhs = params.Xe.stddev**2 * (beta - 1) + tau**2
+
         predicate = r[d - beta] > lhs
 
         return costf(red_cost_model, beta, d, predicate=predicate)
@@ -176,10 +203,8 @@ class PrimalUSVP:
 
         """
         params = LWEParameters.normalize(params)
-
         # allow for a larger embedding lattice dimension: Bai and Galbraith
         m = params.m + params.n if params.Xs <= params.Xe else params.m
-
         if red_shape_model == "gsa":
             with local_minimum(40, max(2 * params.n, 41), precision=5) as it:
                 for beta in it:
@@ -262,11 +287,33 @@ class PrimalHybrid:
         :param r: squared Gram-Schmidt norms
 
         """
+        from math import lgamma, log, exp, pi
+
+        def ball_log_vol(n):
+            return (n / 2.0) * log(pi) - lgamma(n / 2.0 + 1)
+
+        def gaussian_heuristic_log_input(r):
+            n = len(list(r))
+            log_vol = sum(r)
+            log_gh = 1.0 / n * (log_vol - 2 * ball_log_vol(n))
+            return exp(log_gh)
+
         d = len(r)
-        for i, _ in enumerate(r):
-            if gaussian_heuristic(r[i:]) < D.stddev**2 * (d - i):
-                return ZZ(d - (i - 1))
-        return ZZ(2)
+        r = [log(x) for x in r]
+
+        if d > 4096:
+            for i, _ in enumerate(r):
+                # chosen since RC.ADPS16(1754, 1754).log(2.) = 512.168000000000
+                j = d - 1754 + i
+                if (j < d) and (gaussian_heuristic_log_input(r[j:]) < D.stddev**2 * (d - j)):
+                    return ZZ(d - (j - 1))
+            return ZZ(2)
+
+        else:
+            for i, _ in enumerate(r):
+                if gaussian_heuristic_log_input(r[i:]) < D.stddev**2 * (d - i):
+                    return ZZ(d - (i - 1))
+            return ZZ(2)
 
     @staticmethod
     @cached_function
@@ -301,12 +348,17 @@ class PrimalHybrid:
             delta = deltaf(beta)
             d = min(ceil(sqrt(params.n * log(params.q) / log(delta))), m) + 1
         d -= zeta
+
         xi = PrimalUSVP._xi_factor(params.Xs, params.Xe)
-
+        tau = 1
         # 1. Simulate BKZ-β
-        # TODO: pick τ
+        # TODO: pick τ as non default value
 
-        r = simulator(d, params.n - zeta, params.q, beta, xi=xi, dual=True)
+        if params._homogeneous:
+            tau = False
+            d -= 1
+
+        r = simulator(d, params.n - zeta, params.q, beta, xi=xi, tau=tau, dual=True)
 
         bkz_cost = costf(red_cost_model, beta, d)
 
@@ -546,8 +598,23 @@ class PrimalHybrid:
             log_level=log_level + 1,
         )
 
+        def find_zeta_max(params, red_cost_model):
+            usvp_cost = primal_usvp(params, red_cost_model=red_cost_model)["rop"]
+            zeta_max = 1
+            while zeta_max < params.n:
+                # TODO: once support_size() is supported for NTRU, remove the below try/except
+                try:
+                    if params.Xs.support_size(zeta_max) > usvp_cost:
+                        # double it for mitm
+                        return 2 * zeta_max
+                    zeta_max +=1
+                except NotImplementedError:
+                    return params.n
+            return params.n
+
         if zeta is None:
-            with local_minimum(0, params.n, log_level=log_level) as it:
+            zeta_max = find_zeta_max(params, red_cost_model)
+            with local_minimum(0, min(zeta_max, params.n), log_level=log_level) as it:
                 for zeta in it:
                     it.update(
                         f(

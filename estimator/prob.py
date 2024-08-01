@@ -2,6 +2,80 @@
 from sage.all import binomial, ZZ, log, ceil, RealField, oo, exp, pi
 from sage.all import RealDistribution, RR, sqrt, prod, erf
 from .nd import sigmaf
+from .conf import max_n_cache
+
+
+chisquared_table = {i: None for i in range(2*max_n_cache+1)}
+for i in range(2*max_n_cache+1):
+    chisquared_table[i] = RealDistribution('chisquared', i)
+
+
+def conditional_chi_squared(d1, d2, lt, l2):
+    """
+    Probability that a gaussian sample (var=1) of dim d1+d2 has length at most
+    lt knowing that the d2 first coordinates have length at most l2
+
+    :param d1: Dimension of non length-bounded coordinates
+    :param d2: Dimension of length-bounded coordinates
+    :param lt: Length threshold (maximum length of whole vector)
+    :param l2: Length threshold for the first d2 coordinates.
+
+    EXAMPLE::
+        >>> from estimator import prob
+        >>> prob.conditional_chi_squared(100, 5, 105, 1)
+        0.6358492948586715
+
+        >>> prob.conditional_chi_squared(100, 5, 105, 5)
+        0.5764336909205551
+
+        >>> prob.conditional_chi_squared(100, 5, 105, 10)
+        0.5351747076352109
+
+        >>> prob.conditional_chi_squared(100, 5, 50, 10)
+        1.1707597206287592e-06
+
+        >>> prob.conditional_chi_squared(100, 5, 50, .7)
+        5.4021875103989546e-06
+    """
+    D1 = chisquared_table[d1].cum_distribution_function
+    D2 = chisquared_table[d2].cum_distribution_function
+    l2 = RR(l2)
+
+    PE2 = D2(l2)
+    # In large dim, we can get underflow leading to NaN
+    # When this happens, assume lifting is successfully (underestimating security)
+    if PE2==0:
+        raise ValueError("Numerical underflow in conditional_chi_squared")
+
+    steps = 5 * (d1 + d2)
+
+    # Numerical computation of the integral
+    proba = 0.
+    for i in range(steps)[::-1]:
+        l2_min = i * l2 / steps
+        l2_mid = (i + .5) * l2 / steps
+        l2_max = (i + 1) * l2 / steps
+
+        PC2 = (D2(l2_max) - D2(l2_min)) / PE2
+        PE1 = D1(lt - l2_mid)
+
+        proba += PC2 * PE1
+
+    return proba
+
+
+def gaussian_cdf(mu, sigma, t):
+    """
+    Compute the cdf of a continuous gaussian random variable with mean mu and standard deviation
+    sigma (i.e. computes Pr(X <= t), where X is a gaussian random variable).
+
+    :params mu: the mean of the gaussian random variable.
+    :params sigma: the standard deviation of the gaussian random variable.
+    :params t: the limit at which to calculate the cdf.
+
+    :returns: the evaluation of the cdf at t.
+    """
+    return RR((1/2)*(1 + erf((t - mu)/(sqrt(2)*sigma))))
 
 
 def mitm_babai_probability(r, stddev, q, fast=False):
@@ -40,9 +114,9 @@ def babai(r, norm):
     Babai probability following [EPRINT:Wun16]_.
 
     """
-    R = [RR(sqrt(t) / (2 * norm)) for t in r]
+    denom = float(2 * norm) ** 2
     T = RealDistribution("beta", ((len(r) - 1) / 2, 1.0 / 2))
-    probs = [1 - T.cum_distribution_function(1 - s ** 2) for s in R]
+    probs = [1 - T.cum_distribution_function(1 - r_ / denom) for r_ in r]
     return prod(probs)
 
 
@@ -77,7 +151,7 @@ def amplify(target_success_probability, success_probability, majority=False):
 
     :param target_success_probability: targeted success probability < 1
     :param success_probability: targeted success probability < 1
-    :param majority: if `True` amplify a deicsional problem, not a computational one
+    :param majority: if `True` amplify a decisional problem, not a computational one
        if `False` then we assume that we can check solutions, so one success suffices
 
     :returns: number of required trials to amplify
@@ -103,7 +177,7 @@ def amplify(target_success_probability, success_probability, majority=False):
     try:
         if majority:
             eps = success_probability / 2
-            return ceil(2 * log(2 - 2 * target_success_probability) / log(1 - 4 * eps ** 2))
+            return ceil(2 * log(2 - 2 * target_success_probability) / log(1 - 4 * eps**2))
         else:
             # target_success_probability = 1 - (1-success_probability)^trials
             return ceil(log(1 - target_success_probability) / log(1 - success_probability))
@@ -121,8 +195,11 @@ def amplify_sigma(target_advantage, sigma, q):
 
     """
     try:
-        sigma = sum(sigma_ ** 2 for sigma_ in sigma).sqrt()
+        sigma = sum(sigma_**2 for sigma_ in sigma).sqrt()
     except TypeError:
         pass
+    if sigma > 16 * q:
+        return oo
+
     advantage = float(exp(-float(pi) * (float(sigma / q) ** 2)))
     return amplify(target_advantage, advantage, majority=True)
